@@ -16,7 +16,7 @@ function App() {
     return params.get('intake') === 'true';
   });
 
-  const { config, result, isRunning, progress, updateConfig, runSimulation } = useSimulation();
+  const { config, result, isRunning, progress, updateConfig, runSimulation, resetSimulation } = useSimulation();
 
   const handleLogout = () => {
     setLoginState({ isAuthenticated: false, user: null });
@@ -36,7 +36,12 @@ function App() {
 
   // ── Login Page ──
   if (!loginState.isAuthenticated) {
-    return <LoginPage onLogin={setLoginState} />;
+    return (
+      <LoginPage
+        onLogin={setLoginState}
+        onOpenIntake={() => setIsIntakeMode(true)}
+      />
+    );
   }
 
   // ── Neumorphic Dashboard ──
@@ -50,6 +55,7 @@ function App() {
       progress={progress}
       updateConfig={updateConfig}
       runSimulation={runSimulation}
+      resetSimulation={resetSimulation}
     />
   );
 }

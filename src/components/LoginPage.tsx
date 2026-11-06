@@ -8,9 +8,10 @@ import { Eye, EyeOff, AlertCircle, ArrowRight, Heart } from 'lucide-react';
 
 interface LoginPageProps {
   onLogin: (loginState: LoginState) => void;
+  onOpenIntake?: () => void;
 }
 
-export default function LoginPage({ onLogin }: LoginPageProps) {
+export default function LoginPage({ onLogin, onOpenIntake }: LoginPageProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -214,9 +215,13 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
           {/* Divider */}
           <div className="login-divider">
             <div className="login-divider-line" />
-            <span className="login-divider-text">Quick Demo Access</span>
+            <span className="login-divider-text">🏥 Hospital Staff Quick Sign-In</span>
             <div className="login-divider-line" />
           </div>
+
+          <p style={{ fontSize: 11, color: '#64748b', textAlign: 'center', marginBottom: 12 }}>
+            Click any staff profile below to sign in instantly as an Emergency Doctor or Nurse:
+          </p>
 
           {/* Demo Users */}
           <div className="login-demo-grid">
@@ -226,6 +231,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 onClick={() => handleQuickLogin(user)}
                 className="login-demo-btn"
                 id={`quick-login-${user.username}`}
+                title={`Sign in as ${user.name} (${user.role})`}
               >
                 <span className="login-demo-avatar">{user.avatar}</span>
                 <div className="login-demo-info">
@@ -236,9 +242,33 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             ))}
           </div>
 
+          {/* Patient Self-Registration Link */}
+          {onOpenIntake && (
+            <div style={{ textAlign: 'center', marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={onOpenIntake}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#2d9b88',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                📱 Patient Self-Registration Form (Mobile / QR View) →
+              </button>
+            </div>
+          )}
+
           {/* Footer */}
           <p className="login-form-footer">
-            🔒 Simulated login — No real patient data is used
+            🔒 Simulated staff portal — No real patient health records are stored
           </p>
         </div>
       </div>

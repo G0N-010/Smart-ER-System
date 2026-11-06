@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Heart, LayoutDashboard, Activity, Users, Settings, Search,
   Bell, Sun, Moon, Zap, Cpu, HardDrive, Wifi, Play,
-  TrendingUp, TrendingDown, Server, QrCode, LogOut,
+  TrendingUp, Server, QrCode, LogOut,
   Stethoscope, ShieldCheck, Timer, Plus, X, Clock,
-  AlertCircle, UserPlus, CheckCircle2, Eye, Trash2, Cloud, CloudOff
+  AlertCircle, UserPlus, CheckCircle2, Eye, Trash2, Cloud, CloudOff, RotateCcw, ArrowLeft
 } from 'lucide-react';
 import ConfigPanel from './ConfigPanel/ConfigPanel';
 import Dashboard from './Dashboard/Dashboard';
@@ -27,7 +27,8 @@ interface NeuDashboardProps {
   isRunning: boolean;
   progress: number;
   updateConfig: (updates: Partial<HospitalConfig>) => void;
-  runSimulation: () => void;
+  runSimulation?: () => void;
+  resetSimulation?: () => void;
 }
 
 // ── Notification toast type ──
@@ -128,7 +129,7 @@ const TERMINAL_LINES = [
 ];
 
 export default function NeuDashboard({
-  user, onLogout, config, result, isRunning, progress, updateConfig, runSimulation
+  user, onLogout, config, result, isRunning, progress, updateConfig, resetSimulation
 }: NeuDashboardProps) {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [activeNav, setActiveNav] = useState('dashboard');
@@ -159,6 +160,34 @@ export default function NeuDashboard({
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  // ── Navigation with browser history sync ──
+  const navigateTo = useCallback((tab: string) => {
+    setActiveNav(tab);
+    if (window.location.hash !== '#' + tab) {
+      window.location.hash = tab;
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (['dashboard', 'patients', 'settings', 'qrcode'].includes(hash)) {
+        setActiveNav(hash);
+      } else if (!hash) {
+        setActiveNav('dashboard');
+      }
+    };
+    window.addEventListener('hashchange', handleHash);
+    window.addEventListener('popstate', handleHash);
+    if (window.location.hash) {
+      handleHash();
+    }
+    return () => {
+      window.removeEventListener('hashchange', handleHash);
+      window.removeEventListener('popstate', handleHash);
+    };
+  }, []);
 
   const toggleTheme = useCallback(() => {
     setTheme(t => t === 'light' ? 'dark' : 'light');
@@ -250,59 +279,148 @@ export default function NeuDashboard({
     localStorage.removeItem('smarter-patient-requests');
     setPatients([]);
     setSelectedPatient(null);
-    addToast('All patient records cleared', 'warning');
+    setLiveSimResult(null);
+    if (resetSimulation) resetSimulation();
+    addToast('All patient records and simulation data cleared', 'warning');
   };
 
   // ── Submit manual patient entry ──
   const handleAddPatient = async () => {
     if (!addForm.name || !addForm.age || !addForm.symptoms) return;
     setAddFormSubmitting(true);
+    const newId = crypto.randomUUID();
+    const symptomsWithNotes = `${addForm.symptoms}${addForm.doctorNotes ? `\n[Staff Notes: ${addForm.doctorNotes}]` : ''}`;
+    const newPatientRecord: PatientRequest = {
+      id: newId,
+      name: addForm.name,
+      age: parseInt(addForm.age) || 0,
+      gender: addForm.gender,
+      phone: addForm.phone || '',
+      symptoms: symptomsWithNotes,
+      painLevel: addForm.painLevel,
+      allergies: addForm.allergies || '',
+      existingConditions: addForm.existingConditions || '',
+      urgencyLevel: addForm.urgencyLevel,
+      status: 'Pending',
+      timestamp: Date.now(),
+    };
+
+    // Instant local state update so it appears immediately
+    setPatients(prev => [newPatientRecord, ...prev.filter(p => p.id !== newId)]);
     try {
-      const { error } = await supabase.from('patient_requests').insert({
-        id: crypto.randomUUID(),
-        name: addForm.name,
-        age: parseInt(addForm.age),
-        gender: addForm.gender,
-        phone: addForm.phone || '',
-        symptoms: `${addForm.symptoms}${addForm.doctorNotes ? `\n[Staff Notes: ${addForm.doctorNotes}]` : ''}`,
-        pain_level: addForm.painLevel,
-        allergies: addForm.allergies || '',
-        existing_conditions: addForm.existingConditions || '',
-        urgency_level: addForm.urgencyLevel,
+      const stored = JSON.parse(localStorage.getItem('smarter-patient-requests') || '[]');
+      localStorage.setItem('smarter-patient-requests', JSON.stringify([newPatientRecord, ...stored.filter((p: PatientRequest) => p.id !== newId)]));
+    } catch { /* ignore */ }
+
+    addToast(`Patient ${addForm.name} admitted by ${user?.name || 'Staff'}`, 'success');
+    setAddForm({
+      name: '', age: '', gender: 'Male', phone: '', symptoms: '',
+      painLevel: 5, allergies: '', existingConditions: '',
+      urgencyLevel: 'Standard', doctorNotes: '',
+    });
+    setShowAddForm(false);
+
+    try {
+      await supabase.from('patient_requests').insert({
+        id: newId,
+        name: newPatientRecord.name,
+        age: newPatientRecord.age,
+        gender: newPatientRecord.gender,
+        phone: newPatientRecord.phone,
+        symptoms: newPatientRecord.symptoms,
+        pain_level: newPatientRecord.painLevel,
+        allergies: newPatientRecord.allergies,
+        existing_conditions: newPatientRecord.existingConditions,
+        urgency_level: newPatientRecord.urgencyLevel,
         status: 'Pending',
       });
-      if (error) throw error;
-      addToast(`Patient ${addForm.name} added by ${user?.name || 'Staff'}`, 'success');
-      setAddForm({
-        name: '', age: '', gender: 'Male', phone: '', symptoms: '',
-        painLevel: 5, allergies: '', existingConditions: '',
-        urgencyLevel: 'Standard', doctorNotes: '',
-      });
-      setShowAddForm(false);
     } catch (err) {
-      console.error('Add patient error:', err);
-      addToast('Failed to add patient — check connection', 'warning');
+      console.warn('Supabase cloud sync offline, persisted locally:', err);
     }
     setAddFormSubmitting(false);
+  };
+
+  // ── Unified Run Simulation on Active Admitted Patients ──
+  const handleRunSimulation = async () => {
+    if (patients.length === 0) {
+      addToast('No patients in queue — please add patients first using "+ Add Patient" or QR Check-In.', 'warning');
+      return;
+    }
+    setIsLiveSimRunning(true);
+    addToast(`Running triage & resource allocation on ${patients.length} admitted patient records...`, 'success');
+    await new Promise(r => setTimeout(r, 600));
+
+    const { patients: simPatients, surgeHours } = convertLivePatientsToSimulation(patients);
+    const { patients: optimized, resourceUtilization, exhaustionEvents } = optimizeResources(simPatients, config);
+    const hours = Math.max(1, Math.ceil(optimized.length / config.arrivalRate));
+    const hourlyStats = calculateHourlyStats(optimized, hours, surgeHours);
+    const triageBreakdown = {
+      p1: optimized.filter(p => p.triageLevel === 'P1').length,
+      p2: optimized.filter(p => p.triageLevel === 'P2').length,
+      p3: optimized.filter(p => p.triageLevel === 'P3').length,
+      p4: optimized.filter(p => p.triageLevel === 'P4').length,
+    };
+    const avgWaitTime = optimized.length > 0
+      ? Math.round(optimized.reduce((s, p) => s + p.waitTime, 0) / optimized.length)
+      : 0;
+    const peakHour = hourlyStats.length > 0
+      ? hourlyStats.reduce((max, h) => h.arrivals > max.arrivals ? h : max, hourlyStats[0]).hour
+      : 1;
+    const criticalPercent = optimized.length > 0
+      ? Math.round((triageBreakdown.p1 / optimized.length) * 100)
+      : 0;
+    const unmetCount = optimized.filter(p => p.isUnmet).length;
+    const unmetPercent = optimized.length > 0 ? (unmetCount / optimized.length) * 100 : 0;
+    let stressLevel: 'Low' | 'Moderate' | 'Critical' = 'Low';
+    if (unmetPercent > 30 || exhaustionEvents > 10) stressLevel = 'Critical';
+    else if (unmetPercent > 10 || exhaustionEvents > 3) stressLevel = 'Moderate';
+
+    setLiveSimResult({
+      patients: optimized,
+      hourlyStats,
+      resourceUtilization,
+      summary: {
+        totalPatients: optimized.length,
+        criticalPercent,
+        avgWaitTime,
+        peakHour,
+        resourceExhaustionEvents: exhaustionEvents,
+        stressLevel,
+        triageBreakdown,
+      },
+      monteCarloResults: {
+        iterations: 1,
+        avgWaitTimeMean: avgWaitTime,
+        avgWaitTimeLower: Math.max(0, avgWaitTime - 5),
+        avgWaitTimeUpper: avgWaitTime + 5,
+        peakHourDistribution: hourlyStats.map(h => h.arrivals),
+        exhaustionMean: exhaustionEvents,
+        iterationData: [{ iteration: 1, avgWaitTime, peakHour, exhaustionCount: exhaustionEvents }],
+      },
+    });
+    setIsLiveSimRunning(false);
+    addToast(`Simulation complete: ${optimized.length} patient records triaged and resources assigned.`, 'success');
   };
 
   // ── Stats from simulation ──
   // Use liveSimResult if available, otherwise standard result
   const activeResult = liveSimResult || result;
-  const totalPatients = activeResult?.patients?.length || 0;
-  const critPct = activeResult ? Math.round((activeResult.patients.filter(p => p.triageLevel === 'P1').length / totalPatients) * 100) || 0 : 0;
-  const avgWait = activeResult ? parseFloat((activeResult.patients.reduce((s, p) => s + p.waitTime, 0) / totalPatients).toFixed(1)) || 0 : 0;
-  const exhaustionEvents = activeResult?.summary?.resourceExhaustionEvents || 0;
+  const hasData = Boolean(activeResult && activeResult.patients && activeResult.patients.length > 0);
+  const totalPatients = hasData ? activeResult!.patients.length : 0;
+  const critPct = hasData && totalPatients > 0 ? Math.round((activeResult!.patients.filter(p => p.triageLevel === 'P1').length / totalPatients) * 100) : 0;
+  const avgWait = hasData && totalPatients > 0 ? parseFloat((activeResult!.patients.reduce((s, p) => s + p.waitTime, 0) / totalPatients).toFixed(1)) : 0;
+  const exhaustionEvents = hasData ? (activeResult!.summary?.resourceExhaustionEvents || 0) : 0;
 
   const { value: stat1Value, done: stat1Done, ref: stat1Ref } = useNeuCountUp(totalPatients, 1800);
   const { value: stat2Value, done: stat2Done, ref: stat2Ref } = useNeuCountUp(critPct, 1800);
   const { value: stat3Value, done: stat3Done, ref: stat3Ref } = useNeuCountUp(avgWait, 1800, 1);
   const { value: stat4Value, done: stat4Done, ref: stat4Ref } = useNeuCountUp(exhaustionEvents, 1800);
 
-  const doctorUtil = activeResult ? Math.min(100, Math.round((totalPatients / (config.doctors * 8)) * 100)) : 42;
-  const icuUtil = activeResult ? Math.min(100, Math.round((activeResult.patients.filter(p => p.triageLevel === 'P1').length / config.icuBeds) * 100)) : 67;
-  const ventUtil = activeResult ? Math.min(100, Math.round((activeResult.patients.filter(p => p.condition === 'Respiratory Failure').length / config.ventilators) * 100)) : 31;
-  const netLoad = activeResult ? Math.min(100, Math.round(totalPatients / ((config.doctors + config.icuBeds + config.ventilators) * 2) * 100)) : 85;
+  // Hardware pulse metrics — strictly 0% when no active simulation has run
+  const doctorUtil = hasData ? Math.min(100, Math.round((totalPatients / (config.doctors * 8)) * 100)) : 0;
+  const icuUtil = hasData ? Math.min(100, Math.round((activeResult!.patients.filter(p => p.triageLevel === 'P1').length / config.icuBeds) * 100)) : 0;
+  const ventUtil = hasData ? Math.min(100, Math.round((activeResult!.patients.filter(p => p.condition === 'Respiratory Failure').length / config.ventilators) * 100)) : 0;
+  const netLoad = hasData ? Math.min(100, Math.round(totalPatients / ((config.doctors + config.icuBeds + config.ventilators) * 2) * 100)) : 0;
 
   const pendingCount = patients.filter(p => p.status === 'Pending').length;
 
@@ -369,7 +487,7 @@ export default function NeuDashboard({
             }}
             onClick={e => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{
                   width: 40, height: 40, borderRadius: 12,
@@ -380,9 +498,11 @@ export default function NeuDashboard({
                 </div>
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--nm-text)', fontFamily: "'General Sans', sans-serif" }}>
-                    Add Patient
+                    Staff Patient Admission
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--nm-text-muted)' }}>Nurse / Doctor Manual Entry</div>
+                  <div style={{ fontSize: 11, color: 'var(--nm-text-muted)' }}>
+                    Admit by {user?.name || 'Staff'} ({user?.role || 'Clinician'})
+                  </div>
                 </div>
               </div>
               <button onClick={() => setShowAddForm(false)} style={{
@@ -390,9 +510,48 @@ export default function NeuDashboard({
                 width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 cursor: 'pointer', color: 'var(--nm-text-muted)',
                 boxShadow: 'var(--nm-shadow-convex)',
-              }}>
+              }} title="Close / Back">
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* Quick condition presets */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--nm-text-muted)', marginBottom: 6, display: 'block' }}>
+                ⚡ Quick Presets (Click to autofill symptoms & urgency)
+              </label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {[
+                  { label: '🚨 Cardiac Arrest', symptoms: 'Unresponsive, pulseless, immediate CPR needed', urgency: 'Emergency', pain: 10 },
+                  { label: '🫀 Chest Pain', symptoms: 'Severe acute crushing chest pressure radiating to arm', urgency: 'Emergency', pain: 8 },
+                  { label: '🧠 Stroke', symptoms: 'Facial droop, right-sided weakness, slurred speech', urgency: 'Emergency', pain: 8 },
+                  { label: '🫁 Resp. Failure', symptoms: 'Severe dyspnea, wheezing, SpO2 < 85%', urgency: 'Emergency', pain: 9 },
+                  { label: '🩸 Severe Trauma', symptoms: 'MVA blunt abdominal injury, active hemorrhage', urgency: 'Emergency', pain: 9 },
+                  { label: '🦴 Fracture', symptoms: 'Closed compound deformity of right forearm', urgency: 'Urgent', pain: 7 },
+                  { label: '🌡️ High Fever', symptoms: 'Fever 103F, chills, productive cough, lethargy', urgency: 'Standard', pain: 4 },
+                  { label: '🩹 Laceration', symptoms: '2cm superficial hand laceration, controlled bleeding', urgency: 'Standard', pain: 3 },
+                ].map(item => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => {
+                      setAddForm(f => ({
+                        ...f,
+                        symptoms: item.symptoms,
+                        urgencyLevel: item.urgency as PatientRequest['urgencyLevel'],
+                        painLevel: item.pain,
+                      }));
+                    }}
+                    style={{
+                      fontSize: 11, padding: '4px 10px', borderRadius: 10, border: 'none',
+                      background: 'var(--nm-highlight)', color: 'var(--nm-text)',
+                      boxShadow: 'var(--nm-shadow-convex)', cursor: 'pointer',
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Form fields */}
@@ -545,21 +704,39 @@ export default function NeuDashboard({
               </div>
             </div>
 
-            {/* Submit */}
-            <button
-              onClick={handleAddPatient}
-              disabled={addFormSubmitting || !addForm.name || !addForm.age || !addForm.symptoms}
-              style={{
-                width: '100%', marginTop: 18, padding: '12px 0', borderRadius: 14, border: 'none',
-                background: addFormSubmitting ? 'var(--nm-shadow-color)' : 'linear-gradient(135deg, var(--nm-accent-indigo), var(--nm-accent-emerald))',
-                color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                fontFamily: "'General Sans', sans-serif",
-                opacity: (!addForm.name || !addForm.age || !addForm.symptoms) ? 0.5 : 1,
-                transition: 'all 0.3s ease',
-              }}
-            >
-              {addFormSubmitting ? 'Adding...' : '+ Add Patient Record'}
-            </button>
+            {/* Submit & Cancel */}
+            <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
+              <button
+                type="button"
+                onClick={() => setShowAddForm(false)}
+                style={{
+                  flex: 1, padding: '12px 0', borderRadius: 14,
+                  border: '1px solid rgba(128,128,128,0.2)',
+                  background: 'var(--nm-bg)', boxShadow: 'var(--nm-shadow-convex)',
+                  color: 'var(--nm-text-muted)', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                }}
+              >
+                <ArrowLeft className="w-4 h-4" /> Cancel / Back
+              </button>
+              <button
+                type="button"
+                onClick={handleAddPatient}
+                disabled={addFormSubmitting || !addForm.name || !addForm.age || !addForm.symptoms}
+                style={{
+                  flex: 2, padding: '12px 0', borderRadius: 14, border: 'none',
+                  background: addFormSubmitting ? 'var(--nm-shadow-color)' : 'linear-gradient(135deg, var(--nm-accent-indigo), var(--nm-accent-emerald))',
+                  color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                  fontFamily: "'General Sans', sans-serif",
+                  opacity: (!addForm.name || !addForm.age || !addForm.symptoms) ? 0.5 : 1,
+                  transition: 'all 0.3s ease',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                }}
+              >
+                <Plus className="w-4 h-4" />
+                {addFormSubmitting ? 'Admitting...' : '+ Admit Patient Record'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -580,7 +757,7 @@ export default function NeuDashboard({
             <button
               key={item.id}
               className={`nm-nav-item ${activeNav === item.id ? 'active' : ''}`}
-              onClick={() => setActiveNav(item.id)}
+              onClick={() => navigateTo(item.id)}
               title={item.label}
               style={{ position: 'relative' }}
             >
@@ -600,7 +777,7 @@ export default function NeuDashboard({
         <button
           className="nm-nav-item"
           onClick={onLogout}
-          title="Sign Out"
+          title="Sign Out / Back to Login"
           style={{
             color: '#ef4444',
             marginTop: 'auto',
@@ -617,6 +794,30 @@ export default function NeuDashboard({
         {/* Header */}
         <header className="nm-header">
           <div className="nm-header-left">
+            {activeNav !== 'dashboard' && (
+              <button
+                type="button"
+                onClick={() => navigateTo('dashboard')}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 12px',
+                  borderRadius: 10,
+                  border: '1px solid rgba(99,102,241,0.25)',
+                  background: 'var(--nm-bg)',
+                  boxShadow: 'var(--nm-shadow-convex)',
+                  color: 'var(--nm-accent-indigo)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  marginRight: 6,
+                }}
+                title="Go back to Dashboard"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" /> Back
+              </button>
+            )}
             <div className="nm-breadcrumb">
               <span>SmartER /</span> {activeNav.charAt(0).toUpperCase() + activeNav.slice(1)}
             </div>
@@ -626,6 +827,28 @@ export default function NeuDashboard({
             </div>
           </div>
           <div className="nm-header-right">
+            {/* Staff shortcut: Add Patient */}
+            <button
+              onClick={() => setShowAddForm(true)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
+                borderRadius: 10,
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--nm-accent-indigo), var(--nm-accent-emerald))',
+                color: '#fff',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(99,102,241,0.25)',
+              }}
+              title="Admit new patient record"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add Patient
+            </button>
+
             <button className="nm-header-btn nm-theme-toggle-inner" onClick={toggleTheme} title="Toggle theme">
               {theme === 'light' ? <Moon className="w-[18px] h-[18px]" /> : <Sun className="w-[18px] h-[18px]" />}
             </button>
@@ -652,14 +875,25 @@ export default function NeuDashboard({
               {isOnline ? 'Live' : 'Local'}
             </div>
 
-            <div className="nm-avatar" title={user?.name}>
-              {user?.name?.charAt(0) || 'U'}
+            {/* Staff Profile info */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 4 }}>
+              <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nm-text)', lineHeight: 1.2 }}>
+                  {user?.name || 'Staff User'}
+                </span>
+                <span style={{ fontSize: 10, color: 'var(--nm-text-muted)' }}>
+                  {user?.role || 'Clinician'}
+                </span>
+              </div>
+              <div className="nm-avatar" title={user?.name}>
+                {user?.name?.charAt(0) || 'U'}
+              </div>
             </div>
 
             {/* Sign Out Button */}
             <button
               onClick={onLogout}
-              title="Sign out"
+              title="Sign out / Back to Login"
               style={{
                 display: 'flex', alignItems: 'center', gap: 6,
                 padding: '8px 14px', borderRadius: 12, border: 'none',
@@ -722,113 +956,120 @@ export default function NeuDashboard({
               <div className="nm-stats-grid">
                 <div className="nm-stat-card" ref={stat1Ref}>
                   <div className="nm-stat-icon-wrap"><Users className="w-5 h-5 stat-icon" style={{ color: 'var(--nm-accent-indigo)' }} /></div>
-                  <div className={`nm-stat-value ${stat1Done ? 'counted' : ''}`}>{stat1Value.toLocaleString()}</div>
+                  <div className={`nm-stat-value ${stat1Done ? 'counted' : ''}`}>
+                    {hasData ? stat1Value.toLocaleString() : '0'}
+                  </div>
                   <div className="nm-stat-label">Total Patients</div>
-                  <div className="nm-stat-trend up"><TrendingUp className="w-3 h-3" /> +12.5%</div>
+                  {hasData ? (
+                    <div className="nm-stat-trend up"><TrendingUp className="w-3 h-3" /> Active Run</div>
+                  ) : (
+                    <div className="nm-stat-trend neutral">No simulation data</div>
+                  )}
                 </div>
                 <div className="nm-stat-card" ref={stat2Ref}>
                   <div className="nm-stat-icon-wrap"><Zap className="w-5 h-5 stat-icon" style={{ color: 'var(--nm-accent-rose)' }} /></div>
-                  <div className={`nm-stat-value ${stat2Done ? 'counted' : ''}`}>{stat2Value}%</div>
+                  <div className={`nm-stat-value ${stat2Done ? 'counted' : ''}`}>
+                    {hasData ? `${stat2Value}%` : '0%'}
+                  </div>
                   <div className="nm-stat-label">Critical Patients</div>
-                  <div className="nm-stat-trend down"><TrendingDown className="w-3 h-3" /> -3.2%</div>
+                  {hasData ? (
+                    <div className={`nm-stat-trend ${critPct > 25 ? 'down' : 'up'}`}>
+                      <Zap className="w-3 h-3" /> {activeResult?.summary?.triageBreakdown?.p1 || 0} P1 Cases
+                    </div>
+                  ) : (
+                    <div className="nm-stat-trend neutral">No simulation data</div>
+                  )}
                 </div>
                 <div className="nm-stat-card" ref={stat3Ref}>
                   <div className="nm-stat-icon-wrap"><Timer className="w-5 h-5 stat-icon" style={{ color: 'var(--nm-accent-emerald)' }} /></div>
-                  <div className={`nm-stat-value ${stat3Done ? 'counted' : ''}`}>{stat3Value}<span style={{ fontSize: 14, color: 'var(--nm-text-muted)' }}>min</span></div>
+                  <div className={`nm-stat-value ${stat3Done ? 'counted' : ''}`}>
+                    {hasData ? `${stat3Value}` : '0'}<span style={{ fontSize: 14, color: 'var(--nm-text-muted)' }}>min</span>
+                  </div>
                   <div className="nm-stat-label">Avg Wait Time</div>
-                  <div className="nm-stat-trend up"><TrendingUp className="w-3 h-3" /> +1.8%</div>
+                  {hasData ? (
+                    <div className="nm-stat-trend neutral">
+                      <Timer className="w-3 h-3" /> Peak: Hr {activeResult?.summary?.peakHour || 1}
+                    </div>
+                  ) : (
+                    <div className="nm-stat-trend neutral">No simulation data</div>
+                  )}
                 </div>
                 <div className="nm-stat-card" ref={stat4Ref}>
                   <div className="nm-stat-icon-wrap"><ShieldCheck className="w-5 h-5 stat-icon" style={{ color: 'var(--nm-accent-amber)' }} /></div>
-                  <div className={`nm-stat-value ${stat4Done ? 'counted' : ''}`}>{stat4Value}</div>
+                  <div className={`nm-stat-value ${stat4Done ? 'counted' : ''}`}>
+                    {hasData ? stat4Value : '0'}
+                  </div>
                   <div className="nm-stat-label">Exhaustion Events</div>
-                  <div className="nm-stat-trend down"><TrendingDown className="w-3 h-3" /> -8.1%</div>
+                  {hasData ? (
+                    <div className={`nm-stat-trend ${exhaustionEvents > 0 ? 'down' : 'up'}`}>
+                      <ShieldCheck className="w-3 h-3" /> {activeResult?.summary?.stressLevel || 'Normal'} Stress
+                    </div>
+                  ) : (
+                    <div className="nm-stat-trend neutral">No simulation data</div>
+                  )}
                 </div>
               </div>
 
               {/* Quick Actions */}
               <div className="nm-quick-actions">
-                <button className="nm-action-btn" onClick={() => runSimulation()}>
-                  <Play className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-emerald)' }} />
-                  Run Simulation
-                </button>
                 <button
                   className="nm-action-btn"
-                  disabled={patients.length === 0 || isLiveSimRunning}
-                  onClick={async () => {
-                    if (patients.length === 0) {
-                      addToast('No patients to simulate — add patients first', 'warning');
-                      return;
-                    }
-                    setIsLiveSimRunning(true);
-                    addToast(`Running simulation on ${patients.length} live patients...`, 'success');
-                    await new Promise(r => setTimeout(r, 800));
-                    const { patients: simPatients, surgeHours } = convertLivePatientsToSimulation(patients);
-                    const { patients: optimized, resourceUtilization, exhaustionEvents } = optimizeResources(simPatients, config);
-                    const hours = Math.max(1, Math.ceil(optimized.length / config.arrivalRate));
-                    const hourlyStats = calculateHourlyStats(optimized, hours, surgeHours);
-                    const triageBreakdown = {
-                      p1: optimized.filter(p => p.triageLevel === 'P1').length,
-                      p2: optimized.filter(p => p.triageLevel === 'P2').length,
-                      p3: optimized.filter(p => p.triageLevel === 'P3').length,
-                      p4: optimized.filter(p => p.triageLevel === 'P4').length,
-                    };
-                    const avgWaitTime = optimized.length > 0
-                      ? Math.round(optimized.reduce((s, p) => s + p.waitTime, 0) / optimized.length)
-                      : 0;
-                    const peakHour = hourlyStats.length > 0
-                      ? hourlyStats.reduce((max, h) => h.arrivals > max.arrivals ? h : max, hourlyStats[0]).hour
-                      : 1;
-                    const criticalPercent = optimized.length > 0
-                      ? Math.round((triageBreakdown.p1 / optimized.length) * 100)
-                      : 0;
-                    const unmetCount = optimized.filter(p => p.isUnmet).length;
-                    const unmetPercent = optimized.length > 0 ? (unmetCount / optimized.length) * 100 : 0;
-                    let stressLevel: 'Low' | 'Moderate' | 'Critical' = 'Low';
-                    if (unmetPercent > 30 || exhaustionEvents > 10) stressLevel = 'Critical';
-                    else if (unmetPercent > 10 || exhaustionEvents > 3) stressLevel = 'Moderate';
-                    setLiveSimResult({
-                      patients: optimized,
-                      hourlyStats,
-                      resourceUtilization,
-                      summary: {
-                        totalPatients: optimized.length,
-                        criticalPercent,
-                        avgWaitTime,
-                        peakHour,
-                        resourceExhaustionEvents: exhaustionEvents,
-                        stressLevel,
-                        triageBreakdown,
-                      },
-                      monteCarloResults: {
-                        iterations: 1,
-                        avgWaitTimeMean: avgWaitTime,
-                        avgWaitTimeLower: avgWaitTime - 5,
-                        avgWaitTimeUpper: avgWaitTime + 5,
-                        peakHourDistribution: hourlyStats.map(h => h.arrivals),
-                        exhaustionMean: exhaustionEvents,
-                        iterationData: [{ iteration: 1, avgWaitTime, peakHour, exhaustionCount: exhaustionEvents }],
-                      },
-                    });
-                    setIsLiveSimRunning(false);
-                    addToast(`Live simulation complete — ${optimized.length} patients analyzed`, 'success');
-                  }}
+                  disabled={isLiveSimRunning}
+                  onClick={handleRunSimulation}
                   style={{
-                    opacity: patients.length === 0 ? 0.5 : 1,
-                    border: patients.length > 0 ? '1px solid rgba(99,102,241,0.3)' : undefined,
+                    background: patients.length > 0
+                      ? 'linear-gradient(135deg, rgba(34,197,94,0.12), rgba(99,102,241,0.12))'
+                      : undefined,
+                    border: patients.length > 0 ? '1px solid rgba(34,197,94,0.35)' : undefined,
                   }}
+                  title={patients.length === 0 ? "Add patients first to run simulation" : "Run triage and resource optimization on admitted patients"}
                 >
-                  <Activity className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-indigo)' }} />
-                  {isLiveSimRunning ? 'Simulating...' : `Simulate Live (${patients.length})`}
+                  <Play className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-emerald)' }} />
+                  {isLiveSimRunning ? 'Optimizing...' : `Run Simulation (${patients.length} Patient${patients.length === 1 ? '' : 's'})`}
                 </button>
+
                 <button className="nm-action-btn" onClick={() => setShowAddForm(true)}>
-                  <Plus className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-amber)' }} />
-                  Add Patient
+                  <Plus className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-indigo)' }} />
+                  + Add Patient
                 </button>
-                <button className="nm-action-btn" onClick={() => setActiveNav('qrcode')}>
+
+                <button className="nm-action-btn" onClick={() => navigateTo('patients')}>
+                  <Users className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-amber)' }} />
+                  Patient Records ({patients.length})
+                </button>
+
+                <button className="nm-action-btn" onClick={() => navigateTo('qrcode')}>
                   <QrCode className="w-4 h-4 nm-action-icon" style={{ color: 'var(--nm-accent-rose)' }} />
                   QR Check-In
                 </button>
+
+                {hasData && (
+                  <button
+                    className="nm-action-btn"
+                    onClick={() => {
+                      setLiveSimResult(null);
+                      if (resetSimulation) resetSimulation();
+                      addToast('Simulation results cleared — metrics reset to clean zero state', 'success');
+                    }}
+                    style={{ color: 'var(--nm-accent-rose)' }}
+                    title="Clear simulation results and return to clean slate"
+                  >
+                    <RotateCcw className="w-4 h-4 nm-action-icon" />
+                    Clear Simulation
+                  </button>
+                )}
+
+                {patients.length > 0 && (
+                  <button
+                    className="nm-action-btn"
+                    onClick={clearAll}
+                    style={{ color: '#ef4444' }}
+                    title="Clear all patient records from queue"
+                  >
+                    <Trash2 className="w-4 h-4 nm-action-icon" />
+                    Clear All Patients
+                  </button>
+                )}
               </div>
 
               {/* Incoming Patients Banner */}
@@ -946,9 +1187,31 @@ export default function NeuDashboard({
           {/* ═══ PATIENTS VIEW ═══ */}
           {activeNav === 'patients' && (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nm-text)', fontFamily: "'General Sans', sans-serif" }}>
-                  Patient Records ({patients.length})
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18, flexWrap: 'wrap', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button
+                    onClick={() => navigateTo('dashboard')}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '8px 14px',
+                      borderRadius: 12,
+                      border: '1px solid rgba(128,128,128,0.2)',
+                      background: 'var(--nm-bg)',
+                      boxShadow: 'var(--nm-shadow-convex)',
+                      color: 'var(--nm-accent-indigo)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                    title="Go back to Dashboard"
+                  >
+                    <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+                  </button>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nm-text)', fontFamily: "'General Sans', sans-serif" }}>
+                    Admitted Patient Records ({patients.length})
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: 10 }}>
                   <button className="nm-action-btn" onClick={() => setShowAddForm(true)}>
@@ -956,7 +1219,7 @@ export default function NeuDashboard({
                   </button>
                   {patients.length > 0 && (
                     <button className="nm-action-btn" onClick={clearAll} style={{ color: 'var(--nm-accent-rose)' }}>
-                      <Trash2 className="w-4 h-4" /> Clear All
+                      <Trash2 className="w-4 h-4" /> Clear All Patients
                     </button>
                   )}
                 </div>
@@ -965,13 +1228,18 @@ export default function NeuDashboard({
               {patients.length === 0 ? (
                 <div className="nm-detail-card" style={{ textAlign: 'center', padding: 60 }}>
                   <Users className="w-10 h-10" style={{ margin: '0 auto 16px', color: 'var(--nm-text-muted)', opacity: 0.3 }} />
-                  <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--nm-text)', marginBottom: 6 }}>No patients yet</div>
+                  <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--nm-text)', marginBottom: 6 }}>No patient records yet</div>
                   <div style={{ fontSize: 12, color: 'var(--nm-text-muted)', marginBottom: 18 }}>
-                    Add a patient manually or have someone scan the QR code
+                    Admit a patient using the "+ Add Patient" button or scan the QR check-in code. No mock data is preloaded.
                   </div>
-                  <button className="nm-action-btn" onClick={() => setShowAddForm(true)} style={{ margin: '0 auto' }}>
-                    <Plus className="w-4 h-4" style={{ color: 'var(--nm-accent-indigo)' }} /> Add First Patient
-                  </button>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: 10 }}>
+                    <button className="nm-action-btn" onClick={() => setShowAddForm(true)}>
+                      <Plus className="w-4 h-4" style={{ color: 'var(--nm-accent-indigo)' }} /> + Add First Patient
+                    </button>
+                    <button className="nm-action-btn" onClick={() => navigateTo('qrcode')}>
+                      <QrCode className="w-4 h-4" style={{ color: 'var(--nm-accent-rose)' }} /> Open QR Check-In
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div style={{ display: 'grid', gap: 12 }}>
@@ -1067,7 +1335,7 @@ export default function NeuDashboard({
                               background: 'rgba(239,68,68,0.15)', color: '#ef4444', fontSize: 12, fontWeight: 700, cursor: 'pointer',
                               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                             }}>
-                              <Trash2 className="w-4 h-4" />
+                              <Trash2 className="w-4 h-4" /> Delete
                             </button>
                           </div>
                         </div>
@@ -1081,21 +1349,75 @@ export default function NeuDashboard({
 
           {/* ═══ SETTINGS VIEW ═══ */}
           {activeNav === 'settings' && (
-            <div className="nm-detail-card" style={{ gridColumn: '1 / -1' }}>
-              <ConfigPanel
-                config={config}
-                onUpdate={updateConfig}
-                onRun={() => { runSimulation(); setActiveNav('dashboard'); }}
-                isRunning={isRunning}
-                progress={progress}
-              />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  onClick={() => navigateTo('dashboard')}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '8px 14px',
+                    borderRadius: 12,
+                    border: '1px solid rgba(128,128,128,0.2)',
+                    background: 'var(--nm-bg)',
+                    boxShadow: 'var(--nm-shadow-convex)',
+                    color: 'var(--nm-accent-indigo)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Go back to Dashboard"
+                >
+                  <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+                </button>
+                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nm-text)', fontFamily: "'General Sans', sans-serif" }}>
+                  Hospital Resource Configuration
+                </div>
+              </div>
+              <div className="nm-detail-card" style={{ gridColumn: '1 / -1' }}>
+                <ConfigPanel
+                  config={config}
+                  onUpdate={updateConfig}
+                  onRun={() => { handleRunSimulation(); navigateTo('dashboard'); }}
+                  isRunning={isRunning || isLiveSimRunning}
+                  progress={progress}
+                />
+              </div>
             </div>
           )}
 
           {/* ═══ QR CODE VIEW ═══ */}
           {activeNav === 'qrcode' && (
-            <div className="nm-detail-card" style={{ gridColumn: '1 / -1' }}>
-              <QRCodePanel />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  onClick={() => navigateTo('dashboard')}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '8px 14px',
+                    borderRadius: 12,
+                    border: '1px solid rgba(128,128,128,0.2)',
+                    background: 'var(--nm-bg)',
+                    boxShadow: 'var(--nm-shadow-convex)',
+                    color: 'var(--nm-accent-indigo)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Go back to Dashboard"
+                >
+                  <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+                </button>
+                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nm-text)', fontFamily: "'General Sans', sans-serif" }}>
+                  Patient Self-Registration & Mobile QR Check-In
+                </div>
+              </div>
+              <div className="nm-detail-card" style={{ gridColumn: '1 / -1' }}>
+                <QRCodePanel />
+              </div>
             </div>
           )}
         </div>

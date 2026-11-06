@@ -79,7 +79,16 @@ export default function PatientTable({ patients }: PatientTableProps) {
               return (
                 <React.Fragment key={patient.id}>
                   <tr className={`border-b border-slate-800/50 ${patient.isUnmet ? 'unmet-row' : 'patient-row'}`}>
-                    <td className="px-3 py-2.5 text-xs font-mono text-slate-300">{patient.id}</td>
+                    <td className="px-3 py-2.5 text-xs text-slate-300">
+                      {patient.explanation?.startsWith('Live patient: ') ? (
+                        <div>
+                          <span className="font-semibold text-white block">{patient.explanation.split(' — ')[0].replace('Live patient: ', '')}</span>
+                          <span className="text-[10px] text-slate-500 font-mono">{patient.id}</span>
+                        </div>
+                      ) : (
+                        <span className="font-mono">{patient.id}</span>
+                      )}
+                    </td>
                     <td className="px-3 py-2.5 text-xs text-slate-300">{patient.age}</td>
                     <td className="px-3 py-2.5 text-xs text-slate-300 max-w-[140px] truncate">{patient.condition}</td>
                     <td className="px-3 py-2.5">

@@ -129,6 +129,15 @@ export function useSimulation() {
     }));
   }, [state.config]);
 
+  const resetSimulation = useCallback(() => {
+    setState(prev => ({
+      ...prev,
+      result: null,
+      isRunning: false,
+      progress: 0,
+    }));
+  }, []);
+
   return {
     config: state.config,
     result: state.result,
@@ -136,5 +145,6 @@ export function useSimulation() {
     progress: state.progress,
     updateConfig,
     runSimulation,
+    resetSimulation,
   };
 }

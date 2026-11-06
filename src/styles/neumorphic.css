@@ -433,6 +433,11 @@
   background: rgba(244, 63, 94, 0.1);
 }
 
+.nm-stat-trend.neutral {
+  color: var(--nm-text-muted);
+  background: rgba(128, 128, 128, 0.1);
+}
+
 /* ── Quick Actions Row ── */
 .nm-quick-actions {
   display: flex;
